@@ -1,0 +1,55 @@
+#!/bin/bash
+# /etc/update-motd.d/99-overlayfs-status
+#
+# Dynamic MOTD fragment. Raspberry Pi OS runs every executable script in
+# /etc/update-motd.d/ (in order) on each SSH login and concatenates the
+# output. This one checks live overlayfs status and, if it's ON, prints a
+# loud warning so you don't forget and edit something that will vanish on
+# the next reboot.
+
+# Ground-truth check: is the live root filesystem mounted as an overlay?
+# (raspi-config's own "get_overlay_now" getter prints its answer as text —
+# 0 = enabled, 1 = disabled — but its process exit code is always 0 on a
+# successful run regardless of the answer, so testing the exit code with
+# && / || is unreliable.)
+#
+# Match on root's FILESYSTEM TYPE (3rd field of /proc/mounts), not the
+# mount source name: some Raspberry Pi OS builds (e.g. trixie) implement
+# the overlay via the Debian "overlayroot" package, whose source device
+# is named "overlayroot" rather than "overlay" — matching on the source
+# name alone misses this case.
+ROOT_FSTYPE=$(awk '$2 == "/" { print $3; exit }' /proc/mounts)
+if [ "$ROOT_FSTYPE" = "overlay" ]; then
+    OVERLAY_ON=1
+else
+    OVERLAY_ON=0
+fi
+
+if [ "$OVERLAY_ON" -eq 1 ]; then
+    cat <<'EOF'
+
+  ##########################################################################
+  #                                                                        #
+  #   ⚠️   OverlayFS is ON — root filesystem is READ-ONLY (RAM overlay)    #
+  #                                                                        #
+  #   ANY changes you make right now (apt install, config edits, files,   #
+  #   logs written outside excluded paths) will be LOST on next reboot.   #
+  #                                                                        #
+  #   To make persistent changes:                                        #
+  #     overlay-off      # disable overlay, reboots the Pi                #
+  #     ...make your changes, test them...                                #
+  #     overlay-on       # re-enable overlay, reboots the Pi              #
+  #                                                                        #
+  ##########################################################################
+
+EOF
+else
+    cat <<'EOF'
+
+  --------------------------------------------------------------------------
+    OverlayFS is OFF — root filesystem is WRITABLE (changes persist to SD).
+    Remember to run 'overlay-on' when you're done making changes.
+  --------------------------------------------------------------------------
+
+EOF
+fi

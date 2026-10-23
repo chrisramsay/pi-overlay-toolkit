@@ -1,0 +1,33 @@
+#!/bin/bash
+# /usr/local/sbin/overlay-on
+#
+# Enables OverlayFS (root filesystem becomes a RAM-backed overlay, SD card
+# protected from writes) and reboots. Run this once you're done making
+# persistent changes.
+
+set -e
+
+# Ground-truth check via /proc/mounts — raspi-config's own get_overlay_now
+# getter reports its answer as printed text, not via exit code, so testing
+# its exit status directly is unreliable. Match on root's filesystem TYPE
+# (3rd field), not the mount source name: some builds (e.g. trixie) use
+# the Debian "overlayroot" package, whose source device is named
+# "overlayroot" rather than "overlay".
+ROOT_FSTYPE=$(awk '$2 == "/" { print $3; exit }' /proc/mounts)
+if [ "$ROOT_FSTYPE" = "overlay" ]; then
+    echo "Overlay is already ON — root filesystem is already read-only (RAM overlay)."
+    exit 0
+fi
+
+echo "Enabling OverlayFS. The Pi will reboot in 5 seconds..."
+echo "After reboot, root filesystem writes will be RAM-only and lost on power cycle."
+sudo raspi-config nonint enable_overlayfs
+
+# Flush any pending writes to the SD card before rebooting. Without this,
+# a boot that hangs and needs an unclean power-off can silently lose
+# whatever was written in the last few seconds before reboot — including,
+# ironically, files this very toggle just wrote.
+sync
+
+sleep 5
+sudo systemctl reboot
