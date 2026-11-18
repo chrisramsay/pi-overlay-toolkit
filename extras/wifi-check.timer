@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the WiFi self-heal check every 5 minutes
+
+[Timer]
+# Give the network time to come up after boot before the first check.
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

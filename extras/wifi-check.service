@@ -1,0 +1,7 @@
+[Unit]
+Description=WiFi self-heal check (pi-overlay-toolkit extras)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wifi-check.sh

@@ -1,154 +1,202 @@
-# Pi Zero OverlayFS Toolkit
+# Pi OverlayFS Toolkit
 
-Safe-toggle tooling for Raspberry Pi OS's root-filesystem OverlayFS, built
-and verified on a Pi Zero 2 W ("Weather Pi") running Raspberry Pi OS
-trixie (Debian 13, kernel 6.18).
+Safe-toggle tooling for Raspberry Pi OS's read-only root (the
+`raspi-config` overlay, implemented with the `overlayroot` package), for
+any number of unattended Pis.
 
-With overlayfs on, the root filesystem is RAM-backed and read-only on
-disk — great for protecting an SD card on an unattended device, but it
-means **any change you make (config edits, installed packages, scripts)
-silently vanishes on the next reboot** unless you remember to disable the
-overlay first. This toolkit makes that hard to forget and hard to get
-wrong.
+With the overlay on, the root filesystem is a RAM overlay and the SD card
+is never written. That's great for an unattended device, but it means
+**any change you make (config edits, packages, scripts) silently vanishes
+at the next reboot** unless you turn the overlay off first. This toolkit
+makes that hard to forget and hard to get wrong, the same way on every Pi.
+
+Nothing in it is specific to one host: hostnames, boot paths, and WiFi
+interfaces are all detected at run time.
+
+## Hosts
+
+| Host | Hardware | OS | Status |
+|---|---|---|---|
+| `weatherhat` | Pi Zero 2 W + BC Robotics Weather HAT Pro | Raspberry Pi OS trixie (Debian 13) | v1 verified on hardware; v2 (this version) not yet |
+| `enviro` | Pi Zero 2 W | | not yet deployed |
+| new weather-board Pi | Pi Zero 2 W | | not yet built |
+
+Update this table as each host is verified.
 
 ## What's included
 
-| File | Purpose |
-|---|---|
-| `overlay-off` | Disables overlayfs (root becomes writable) and reboots |
-| `overlay-on` | Re-enables overlayfs (root becomes RAM-only) and reboots |
-| `99-overlayfs-status` | Dynamic MOTD banner — shows live overlay state on every SSH login |
-| `install-overlay-tools.sh` | Installs the three files above |
-| `extras/` | Optional reliability add-ons (watchdog + WiFi self-heal) — see below, **not yet verified on hardware** |
+| File | Installed to | Purpose |
+|---|---|---|
+| `overlay-common.sh` | `/usr/local/lib/pi-overlay-toolkit/` | Shared helpers (state detection, boot paths) |
+| `overlay-switch` | `/usr/local/bin/` | Does the work: `overlay-switch on\|off [--no-reboot]` |
+| `overlay-on`, `overlay-off` | `/usr/local/bin/` | Wrappers for the above, the commands you type |
+| `overlay-status` | `/usr/local/bin/` | State now and after the next boot; `--short` for scripts |
+| `99-overlayfs-status` | `/etc/update-motd.d/` | Login banner showing live state and any pending change |
+| `install-overlay-tools.sh` | | Installs/upgrades/uninstalls the above on the Pi it runs on |
+| `deploy.sh` | | Runs the installer on several Pis over SSH from your workstation |
+| `extras/` | | Optional WiFi self-heal + hardware watchdog (see below) |
 
-## Why this isn't just `raspi-config nonint enable_overlayfs`
+## Install
 
-Two gotchas this toolkit works around:
-
-1. **`raspi-config nonint get_overlay_now` is not safe to use with `&&`/`||`.**
-   It prints its answer as text (`0` = enabled, `1` = disabled), but the
-   *process exit code* is always `0` on a successful run, regardless of
-   which answer it printed. Testing the exit code (`get_overlay_now &&
-   echo on || echo off`) will almost always say "on" no matter the real
-   state. This toolkit instead reads `/proc/mounts` directly — ground
-   truth, no ambiguity.
-
-2. **Match on filesystem *type*, not mount *source name*.** Some
-   Raspberry Pi OS builds (including trixie, where this was built)
-   implement the overlay via the Debian `overlayroot` package. Its mount
-   source is literally named `overlayroot`, not `overlay`:
-   ```
-   overlayroot / overlay rw,relatime,lowerdir=/media/root-ro,...
-   ```
-   A check like `grep '^overlay / ' /proc/mounts` misses this entirely,
-   because it matches on the first field (the source name). Checking the
-   **third** field (filesystem type, which is `overlay` regardless of
-   which package provides it) works on both the classic and the
-   `overlayroot`-based implementations:
-   ```bash
-   ROOT_FSTYPE=$(awk '$2 == "/" { print $3; exit }' /proc/mounts)
-   [ "$ROOT_FSTYPE" = "overlay" ]
-   ```
-
-3. **`sync` before every reboot these scripts trigger.** A write to disk
-   isn't necessarily flushed from the page cache immediately. If a
-   reboot hangs and needs an unclean power-off, anything not yet flushed
-   can be lost — including, ironically, files this very toolkit just
-   installed. Every script here calls `sync` right before it reboots, to
-   close that window. `install-overlay-tools.sh` also **verifies its own
-   install succeeded** (checks the banner file actually contains the
-   expected content) before reporting success, rather than assuming a
-   zero exit code means the files landed.
-
-## Installation on a new Pi
+### On several Pis from your workstation
 
 ```bash
-# 1. Make sure overlayfs is off (root must be writable to install anything
-#    persistent). If you're not sure, check:
-awk '$2 == "/" {print $3}' /proc/mounts
-#    "ext4" = writable, good to proceed. "overlay" = disable it first:
-sudo raspi-config nonint disable_overlayfs && sudo systemctl reboot
+git clone https://github.com/chrisramsay/pi-overlay-toolkit
+cd pi-overlay-toolkit
 
-# 2. Copy this repo onto the Pi (scp, git clone, or paste file contents
-#    manually), then from inside it:
-sudo bash install-overlay-tools.sh
+# Pis whose overlay is currently off (e.g. a new Pi mid-setup):
+./deploy.sh enviro.searby.space
 
-# 3. The installer verifies itself and will refuse to report success if
-#    the write didn't actually land. Once it says "Done":
-overlay-on
+# Pis that are already overlaid: --cycle turns the overlay off, waits for the
+# reboot, installs, turns it back on and waits again.
+./deploy.sh --cycle weatherhat.searby.space enviro.searby.space
+
+# Add the reliability extras at the same time:
+./deploy.sh --cycle --extras weatherhat.searby.space
 ```
 
-Log out and back in — the MOTD banner should now show OverlayFS as ON,
-matching `awk '$2 == "/" {print $3}' /proc/mounts` (which should print
-`overlay`).
+`deploy.sh` needs SSH access and sudo on each Pi (passwordless sudo is
+easiest, but it uses `ssh -t`, so a password prompt also works). Put extra
+SSH options in `SSH_OPTS`, e.g. `SSH_OPTS="-o User=pi" ./deploy.sh ...`.
+A host found with the overlay off is always left off.
+
+### On one Pi by hand
+
+```bash
+overlay-status 2>/dev/null || awk '$2 == "/" {print $3}' /proc/mounts
+# "ext4" / "OFF now": go ahead. "overlay" / "ON now": turn it off first:
+#   sudo raspi-config nonint disable_overlayfs && sudo reboot
+
+sudo bash install-overlay-tools.sh      # verifies every file landed
+overlay-on                              # when you're finished
+```
+
+Uninstall with `sudo bash install-overlay-tools.sh --uninstall`. This
+leaves the overlay setting as it is.
+
+**Upgrading from v1:** v1 installed `overlay-on`/`overlay-off` into
+`/usr/local/sbin`. The installer removes those and puts everything in
+`/usr/local/bin`, which is on a normal user's `PATH` on Bookworm as well as
+Trixie. (Bookworm's default user `PATH` has no `sbin`.)
 
 ## Day-to-day usage
 
-Any change you want to **persist across a reboot** — editing a config,
-installing a package, adding a cron job, touching anything under `/`
-including `/home` — needs:
-
 ```bash
-overlay-off      # wait for reboot, root is now writable
-# ...make your changes...
-overlay-on        # wait for reboot, changes are now locked in under RAM overlay
+overlay-status   # e.g. "enviro: overlay is ON now, ON after next boot."
+overlay-off      # reboots; root is now writable
+# ...make and test your changes...
+overlay-on       # reboots; changes locked in, SD card protected again
 ```
 
-You do **not** need to do this for changes you don't need to survive a
-reboot (checking logs, running something to test it in the current
-session, etc).
+The commands re-run themselves under `sudo`, so you don't need to type it.
+You don't need any of this for changes that don't have to survive a reboot,
+such as checking logs or trying something out.
 
-`sync` is already built into `overlay-off`/`overlay-on` — you don't need
-to run it yourself unless you reboot some other way (e.g. a bare
-`sudo systemctl reboot`) without going through these scripts, in which
-case running `sync` first first is cheap insurance.
+### Live vs configured state
 
-## extras/ — reliability add-ons (not yet verified)
+The overlay has two states that can disagree:
 
-These address a separate problem from the overlay toggling above: a Pi
-that hangs or drops off WiFi after a few days and needs a manual power
-cycle to recover. They were written and discussed in the same session as
-the toolkit above, but **the watchdog + wifi-check setup itself was not
-confirmed working end-to-end on real hardware** before this repo was
-packaged — treat `extras/` as a starting point to test, not a verified
-component like the rest of this repo.
+- **live**: what `/` is mounted as right now (from `/proc/mounts`)
+- **configured**: what it will be after the next boot (`overlayroot=tmpfs`
+  in `cmdline.txt`)
 
-- **`wifi-check.sh`** — runs every 5 minutes via cron; pings the default
-  gateway, cycles `wlan0` if unreachable, and reboots if that doesn't
-  recover it. Uses `ip link` directly rather than `nmcli`/`wpa_cli`, so
-  it should work regardless of network stack.
-- **`install-reliability-extras.sh`** — installs `wifi-check.sh` + its
-  cron job, and enables the Pi's hardware watchdog in
-  `/boot/firmware/config.txt`. **One manual step remains after running
-  it**: edit `/etc/systemd/system.conf` and set
-  ```ini
-  RuntimeWatchdogSec=15
-  RebootWatchdogSec=2min
+They disagree after `overlay-on --no-reboot`, or after a toggle whose
+reboot was interrupted. `overlay-switch` handles every combination:
+
+| live | configured | you ask for | result |
+|---|---|---|---|
+| X | X | X | nothing to do |
+| X | Y | X | pending change cancelled, **no reboot** |
+| Y | X | X | already configured, just reboots |
+| Y | Y | X | changes config, reboots |
+
+The login banner and `overlay-status` show any pending change.
+
+`--no-reboot` is there for scripts and Ansible: make the config change now
+and reboot on your own schedule.
+
+## Why this isn't just `raspi-config nonint enable_overlayfs`
+
+1. **`raspi-config nonint get_overlay_now` prints its answer and doesn't
+   return it.** It prints `0` (on) or `1` (off), but the process exit code
+   is `0` either way, so `get_overlay_now && echo on || echo off` almost
+   always says "on". The toolkit reads `/proc/mounts` instead.
+
+2. **Match the filesystem type, not the mount source.** Current Raspberry
+   Pi OS implements the overlay with Debian's `overlayroot`, whose mount
+   source is literally `overlayroot`:
+   ```
+   overlayroot / overlay rw,relatime,lowerdir=/media/root-ro,...
+   ```
+   `grep '^overlay / ' /proc/mounts` misses that. The third field (type) is
+   `overlay` for both `overlayroot` and the older implementation:
+   ```bash
+   awk '$2 == "/" { print $3; exit }' /proc/mounts
+   ```
+
+3. **Don't trust exit codes alone.** After calling `raspi-config`, the
+   toolkit re-reads `cmdline.txt` to confirm the change landed before it
+   reboots. The installer compares every installed file byte-for-byte with
+   its source before reporting success.
+
+4. **`sync` before every reboot.** If a reboot hangs and needs an unclean
+   power-off, anything still in the page cache is lost. That can include the
+   `cmdline.txt` edit or the files just installed.
+
+5. **Boot paths differ by release.** Bookworm and later use
+   `/boot/firmware/`, while older images use `/boot/`. Both are checked.
+
+Note that `raspi-config` refuses to enable the overlay on boards with
+256 MB of RAM or less. A Pi Zero 2 W (512 MB) is fine. The first
+`overlay-on` on a fresh image may also `apt-get install overlayroot`, so
+the Pi needs network access at that point.
+
+## extras/: reliability add-ons (not yet verified on hardware)
+
+These address a different problem from the overlay: a Pi that hangs or
+drops off WiFi after a few days and needs a manual power cycle.
+
+- **WiFi self-heal.** `wifi-check.sh` is run every 5 minutes by
+  `wifi-check.timer` (first run 10 minutes after boot). It pings the
+  default gateway. If that fails, it cycles the WiFi interface, using
+  `nmcli` when NetworkManager manages it and `ip link` otherwise. If the
+  link still doesn't come back, it reboots, but only once the Pi has been
+  up for at least `MIN_UPTIME_MIN` (default 30). That way an AP or router
+  outage can't send every Pi into a reboot loop. Settings live in
+  `/etc/default/wifi-check`, and the installer never overwrites that file:
+  ```bash
+  #WIFI_IFACE=wlan0          # default: first wireless interface
+  #PING_TARGET=192.168.20.1  # default: default gateway
+  #MIN_UPTIME_MIN=30
+  #REBOOT=yes                # "no" = only cycle the interface
   ```
-  (uncomment and/or add these lines) before rebooting.
-
-Usage follows the same overlay-off → install → overlay-on pattern:
+  It logs only when it does something: `journalctl -t wifi-check`.
+- **Hardware watchdog.** Adds `dtparam=watchdog=on` to `config.txt` and
+  installs the systemd drop-in
+  `/etc/systemd/system.conf.d/10-pi-watchdog.conf`
+  (`RuntimeWatchdogSec=15`, `RebootWatchdogSec=2min`). No hand-editing of
+  `system.conf` is needed.
 
 ```bash
 overlay-off
-sudo bash extras/install-reliability-extras.sh
-sudo nano /etc/systemd/system.conf   # set the two watchdog lines above
-sudo systemctl reboot
+sudo bash extras/install-reliability-extras.sh   # --uninstall to remove
+overlay-on                                        # its reboot activates the watchdog
 
-# after reboot, verify:
-ls -l /dev/watchdog
-systemctl show -p WatchdogDevice -p RuntimeWatchdogUSec
-cat /etc/cron.d/wifi-check
-
-overlay-on
+# after the reboot, verify:
+systemctl show -p RuntimeWatchdogUSec     # 15s
+ls -l /dev/watchdog*
+systemctl list-timers wifi-check.timer
 ```
 
-## Background / history
+(`./deploy.sh --cycle --extras host` does all of this.) The installer also
+removes the cron job and `/usr/local/bin/wifi-check.sh` left by v1 of the
+extras.
 
-This toolkit went through several iterations before reaching the state
-above — notably the two gotchas in the "Why this isn't just..." section,
-both discovered by testing against the real `overlayroot`-based
-implementation rather than assuming the classic one. If you're adapting
-this for a Pi that *doesn't* use the `overlayroot` package, the
-`ROOT_FSTYPE` check still works fine (plain `overlay` sources also
-report filesystem type `overlay`).
+## Background
+
+The two gotchas at the top of "Why this isn't just..." were found by
+testing against the real `overlayroot`-based implementation on the Weather
+Pi (now `weatherhat`), rather than assuming the classic one. v2 generalised
+the toolkit for the other Pi Zero 2 Ws (`enviro` and the forthcoming
+weather-board Pi). It added state handling, the deploy script, and
+self-configuring extras.

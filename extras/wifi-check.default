@@ -1,0 +1,15 @@
+# /etc/default/wifi-check — settings for /usr/local/sbin/wifi-check.sh
+# Everything is optional; the defaults suit a Pi Zero 2 W on WiFi.
+
+# Interface to cycle. Default: the first wireless interface found.
+#WIFI_IFACE=wlan0
+
+# Host to ping. Default: the default gateway on WIFI_IFACE.
+#PING_TARGET=192.168.20.1
+
+# Don't reboot unless the Pi has been up at least this many minutes, so an
+# AP or router outage can't put every Pi into a reboot loop.
+#MIN_UPTIME_MIN=30
+
+# Set to "no" to only cycle the interface and never reboot.
+#REBOOT=yes

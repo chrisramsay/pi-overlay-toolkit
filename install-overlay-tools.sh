@@ -1,63 +1,94 @@
 #!/bin/bash
 # install-overlay-tools.sh
 #
-# Installs, on the Weather Pi:
-#   - /usr/local/sbin/overlay-off  and  overlay-on   (toggle helper scripts)
-#   - /etc/update-motd.d/99-overlayfs-status          (login warning banner)
+# Installs the overlay toolkit on any Raspberry Pi OS host:
+#   /usr/local/lib/pi-overlay-toolkit/overlay-common.sh   shared helpers
+#   /usr/local/bin/overlay-switch, overlay-on, overlay-off, overlay-status
+#   /etc/update-motd.d/99-overlayfs-status                 login banner
 #
-# Run this ONCE with overlayfs disabled (see step 1 below), so the files
-# actually persist to the SD card.
+# Run it with the overlay OFF, or the files vanish at the next reboot.
+# To install on several Pis from your workstation, use deploy.sh instead.
 #
-# Usage:
-#   1. sudo raspi-config nonint disable_overlayfs && sudo systemctl reboot
-#   2. scp this script and the three files it installs onto the Pi, or copy
-#      their contents in manually
-#   3. sudo bash install-overlay-tools.sh
-#   4. sudo raspi-config nonint enable_overlayfs && sudo systemctl reboot
+#   sudo bash install-overlay-tools.sh               install / upgrade
+#   sudo bash install-overlay-tools.sh --uninstall   remove everything
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=overlay-common.sh
+. "$SCRIPT_DIR/overlay-common.sh"
 
-# Ground-truth check via /proc/mounts — raspi-config's own get_overlay_now
-# getter reports its answer as printed text, not via exit code, so testing
-# its exit status directly is unreliable. Match on root's filesystem TYPE
-# (3rd field), not the mount source name: some builds (e.g. trixie) use
-# the Debian "overlayroot" package, whose source device is named
-# "overlayroot" rather than "overlay".
-ROOT_FSTYPE=$(awk '$2 == "/" { print $3; exit }' /proc/mounts)
-if [ "$ROOT_FSTYPE" = "overlay" ]; then
-    echo "ERROR: OverlayFS is currently ON. Disable it first, or these files"
-    echo "will vanish on the next reboot:"
-    echo "  overlay-off"
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo -- bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" "$@"
+fi
+
+LIBDIR=/usr/local/lib/pi-overlay-toolkit
+BINDIR=/usr/local/bin
+MOTD=/etc/update-motd.d/99-overlayfs-status
+HOST=$(hostname)
+
+if pot_overlay_live; then
+    echo "ERROR: $HOST: OverlayFS is currently ON, so anything installed now"
+    echo "would vanish at the next reboot. Run 'overlay-off' (or"
+    echo "'sudo raspi-config nonint disable_overlayfs && sudo reboot') first."
     exit 1
 fi
 
-echo "Installing overlay-off / overlay-on to /usr/local/sbin ..."
-sudo install -m 755 "$SCRIPT_DIR/overlay-off" /usr/local/sbin/overlay-off
-sudo install -m 755 "$SCRIPT_DIR/overlay-on"  /usr/local/sbin/overlay-on
+# v1 of this toolkit installed into /usr/local/sbin, which isn't on a
+# normal user's PATH on Bookworm. Clear those copies so there's one of each.
+remove_legacy() {
+    rm -f /usr/local/sbin/overlay-on /usr/local/sbin/overlay-off
+}
 
-echo "Installing MOTD banner to /etc/update-motd.d ..."
-sudo install -m 755 "$SCRIPT_DIR/99-overlayfs-status" /etc/update-motd.d/99-overlayfs-status
+if [ "${1:-}" = "--uninstall" ]; then
+    echo "$HOST: removing overlay toolkit ..."
+    rm -f "$BINDIR"/overlay-switch "$BINDIR"/overlay-on "$BINDIR"/overlay-off \
+          "$BINDIR"/overlay-status "$MOTD"
+    rm -rf "$LIBDIR"
+    remove_legacy
+    sync
+    echo "$HOST: removed. The overlay's current setting is unchanged:"
+    echo "  live=$(pot_live_word) configured=$(pot_configured_word)"
+    exit 0
+fi
 
-# Flush installed files to the SD card now, rather than trusting the next
-# command (often 'overlay-on', which reboots) to do it in time. A hang
-# during that reboot followed by an unclean power-off can otherwise lose
-# writes from the last few seconds — including these files.
+echo "$HOST: installing overlay toolkit ..."
+install -d -m 755 "$LIBDIR"
+install -m 644 "$SCRIPT_DIR/overlay-common.sh" "$LIBDIR/overlay-common.sh"
+for f in overlay-switch overlay-on overlay-off overlay-status; do
+    install -m 755 "$SCRIPT_DIR/$f" "$BINDIR/$f"
+done
+install -m 755 "$SCRIPT_DIR/99-overlayfs-status" "$MOTD"
+remove_legacy
+
+# Flush now, rather than trusting the next command (usually overlay-on,
+# which reboots) to do it in time.
 sync
 
-# Verify the install actually landed before claiming success.
-if ! grep -q ROOT_FSTYPE /etc/update-motd.d/99-overlayfs-status; then
-    echo "ERROR: install did not take — /etc/update-motd.d/99-overlayfs-status"
-    echo "does not contain the expected content. Do not proceed to overlay-on."
+# Verify every file landed byte-for-byte before claiming success.
+FAILED=0
+check() {
+    if ! cmp -s "$1" "$2"; then
+        echo "ERROR: $2 doesn't match $1"
+        FAILED=1
+    fi
+}
+check "$SCRIPT_DIR/overlay-common.sh" "$LIBDIR/overlay-common.sh"
+for f in overlay-switch overlay-on overlay-off overlay-status; do
+    check "$SCRIPT_DIR/$f" "$BINDIR/$f"
+done
+check "$SCRIPT_DIR/99-overlayfs-status" "$MOTD"
+if [ "$FAILED" -ne 0 ]; then
+    echo "$HOST: install did NOT take. Do not run overlay-on yet."
     exit 1
 fi
 
 echo ""
-echo "Done. From any SSH session you can now run:"
-echo "  overlay-off   # disable overlay, root becomes writable, reboots"
-echo "  overlay-on    # re-enable overlay, reboots"
+echo "$HOST: done."
+"$BINDIR/overlay-status"
 echo ""
-echo "The banner will show on every SSH login from now on."
-echo "Remember to re-enable the overlay when you're finished:"
-echo "  overlay-on"
+echo "  overlay-status   show state now and after next boot"
+echo "  overlay-off      root becomes writable, reboots"
+echo "  overlay-on       protection back on, reboots"
+echo ""
+echo "When you've finished making changes: overlay-on"
