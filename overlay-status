@@ -1,0 +1,30 @@
+#!/bin/bash
+# /usr/local/bin/overlay-status
+#
+# Show the overlay state now and after the next boot. No root needed.
+#
+#   overlay-status            human-readable
+#   overlay-status --short    "live=on configured=on" (for scripts/Ansible)
+#
+# Exit code is 0 whenever the state could be read, whatever the state is.
+# Parse the output; don't use the exit code as an on/off answer.
+
+set -euo pipefail
+
+LIB=/usr/local/lib/pi-overlay-toolkit/overlay-common.sh
+[ -r "$LIB" ] || LIB="$(dirname "$(readlink -f "$0")")/overlay-common.sh"
+# shellcheck source=overlay-common.sh
+. "$LIB"
+
+LIVE=$(pot_live_word)
+CONF=$(pot_configured_word)
+
+if [ "${1:-}" = "--short" ]; then
+    echo "live=$LIVE configured=$CONF"
+    exit 0
+fi
+
+echo "$(hostname): overlay is ${LIVE^^} now, ${CONF^^} after next boot."
+if [ "$LIVE" != "$CONF" ] && [ "$CONF" != unknown ]; then
+    echo "A change is pending: reboot to apply it, or run 'overlay-$LIVE' to cancel it."
+fi

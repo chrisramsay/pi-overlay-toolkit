@@ -1,61 +1,98 @@
 #!/bin/bash
 # install-reliability-extras.sh
 #
-# Installs the optional watchdog + wifi-check self-heal setup discussed
-# alongside the overlay toolkit. NOT yet verified end-to-end on real
-# hardware as of this repo's creation — test carefully after installing.
+# Optional add-ons for an unattended Pi that sometimes hangs or drops off
+# WiFi and needs a manual power cycle:
 #
-# Run this with overlayfs OFF (see ../overlay-off), same as the main
-# toolkit's installer, so the changes persist to the SD card.
+#   1. wifi-check: /usr/local/sbin/wifi-check.sh run every 5 minutes by a
+#      systemd timer. Cycles WiFi if the gateway is unreachable, and reboots
+#      if that doesn't fix it (with a minimum-uptime guard against loops).
+#      Settings in /etc/default/wifi-check (never overwritten).
+#   2. Hardware watchdog: dtparam=watchdog=on in config.txt, plus a systemd
+#      drop-in (/etc/systemd/system.conf.d/10-pi-watchdog.conf), so a full
+#      hang resets the board. No manual editing of system.conf needed.
 #
-# What this does:
-#   1. Installs /usr/local/bin/wifi-check.sh and a cron job that runs it
-#      every 5 minutes, to recover from WiFi-only drops.
-#   2. Enables the Pi's hardware watchdog via /boot/firmware/config.txt
-#      and systemd, to recover from full system hangs.
-#
-# Usage:
+# Host-agnostic. Run with the overlay OFF so the changes persist:
 #   overlay-off
-#   sudo bash install-reliability-extras.sh
-#   # review the watchdog note this script prints, reboot when ready
+#   sudo bash extras/install-reliability-extras.sh            install
+#   sudo bash extras/install-reliability-extras.sh --uninstall
+#   sudo reboot      # watchdog settings take effect at boot
 #   overlay-on
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=overlay-common.sh
+. "$SCRIPT_DIR/../overlay-common.sh"
 
-ROOT_FSTYPE=$(awk '$2 == "/" { print $3; exit }' /proc/mounts)
-if [ "$ROOT_FSTYPE" = "overlay" ]; then
-    echo "ERROR: OverlayFS is currently ON. Run 'overlay-off' first, or these"
-    echo "changes will be lost on the next reboot."
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo -- bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" "$@"
+fi
+
+HOST=$(hostname)
+DROPIN_DIR=/etc/systemd/system.conf.d
+DROPIN=$DROPIN_DIR/10-pi-watchdog.conf
+
+if pot_overlay_live; then
+    echo "ERROR: $HOST: OverlayFS is ON, so these changes would be lost at"
+    echo "the next reboot. Run 'overlay-off' first."
     exit 1
 fi
 
-echo "Installing wifi-check.sh to /usr/local/bin ..."
-sudo install -m 755 "$SCRIPT_DIR/wifi-check.sh" /usr/local/bin/wifi-check.sh
+CONFIG_TXT=$(pot_config_txt) || {
+    echo "ERROR: $HOST: can't find config.txt under /boot/firmware or /boot."
+    exit 1
+}
 
-echo "Installing cron job (every 5 minutes) ..."
-echo "*/5 * * * * root /usr/local/bin/wifi-check.sh" | sudo tee /etc/cron.d/wifi-check > /dev/null
+# The first version of the extras used cron and /usr/local/bin.
+remove_legacy() {
+    rm -f /etc/cron.d/wifi-check /usr/local/bin/wifi-check.sh
+}
 
-echo "Enabling hardware watchdog in /boot/firmware/config.txt ..."
-if ! grep -q '^dtparam=watchdog=on' /boot/firmware/config.txt 2>/dev/null; then
-    echo "dtparam=watchdog=on" | sudo tee -a /boot/firmware/config.txt > /dev/null
-else
-    echo "  (already present)"
+if [ "${1:-}" = "--uninstall" ]; then
+    echo "$HOST: removing reliability extras ..."
+    systemctl disable --now wifi-check.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/wifi-check.service /etc/systemd/system/wifi-check.timer \
+          /usr/local/sbin/wifi-check.sh "$DROPIN"
+    remove_legacy
+    systemctl daemon-reload
+    echo "  Left in place: /etc/default/wifi-check (your settings) and"
+    echo "  'dtparam=watchdog=on' in $CONFIG_TXT (harmless without the drop-in)."
+    sync
+    echo "$HOST: removed. Reboot to stop systemd using the watchdog."
+    exit 0
 fi
 
-echo ""
-echo "Manual step still required: edit /etc/systemd/system.conf and set:"
-echo "  RuntimeWatchdogSec=15"
-echo "  RebootWatchdogSec=2min"
-echo "(uncomment and/or add these lines, then save)"
-echo ""
+echo "$HOST: installing wifi-check ..."
+install -m 755 "$SCRIPT_DIR/wifi-check.sh" /usr/local/sbin/wifi-check.sh
+install -m 644 "$SCRIPT_DIR/wifi-check.service" /etc/systemd/system/wifi-check.service
+install -m 644 "$SCRIPT_DIR/wifi-check.timer"   /etc/systemd/system/wifi-check.timer
+if [ ! -e /etc/default/wifi-check ]; then
+    install -m 644 "$SCRIPT_DIR/wifi-check.default" /etc/default/wifi-check
+else
+    echo "  /etc/default/wifi-check exists, leaving your settings alone"
+fi
+remove_legacy
+systemctl daemon-reload
+systemctl enable --now wifi-check.timer
+
+echo "$HOST: enabling hardware watchdog ..."
+if grep -q '^dtparam=watchdog=on' "$CONFIG_TXT"; then
+    echo "  dtparam=watchdog=on already in $CONFIG_TXT"
+else
+    echo "dtparam=watchdog=on" >> "$CONFIG_TXT"
+    echo "  added dtparam=watchdog=on to $CONFIG_TXT"
+fi
+install -d -m 755 "$DROPIN_DIR"
+install -m 644 "$SCRIPT_DIR/watchdog.conf" "$DROPIN"
 
 sync
 
-echo "Done. After editing system.conf as above, reboot and verify:"
-echo "  ls -l /dev/watchdog"
-echo "  systemctl show -p WatchdogDevice -p RuntimeWatchdogUSec"
-echo "  cat /etc/cron.d/wifi-check"
+echo ""
+echo "$HOST: done. Reboot for the watchdog to take effect, then check:"
+echo "  systemctl show -p RuntimeWatchdogUSec   # expect 15s"
+echo "  ls -l /dev/watchdog*"
+echo "  systemctl list-timers wifi-check.timer"
+echo "  journalctl -t wifi-check                # only logs when it acts"
 echo ""
 echo "Then: overlay-on"

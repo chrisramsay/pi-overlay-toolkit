@@ -1,0 +1,104 @@
+#!/bin/bash
+# /usr/local/bin/overlay-switch
+#
+# Turn Raspberry Pi OS's root-filesystem overlay on or off, then reboot.
+# Normally called through the overlay-on / overlay-off wrappers.
+#
+#   overlay-switch on|off [--no-reboot]
+#
+# Knows the difference between the LIVE state (what / is mounted as now)
+# and the CONFIGURED state (what cmdline.txt says for the next boot), so it
+# does the right thing if a previous run was interrupted or used --no-reboot:
+#
+#   live  configured  asked-for   action
+#   ----  ----------  ---------   ------------------------------------------
+#   X     X           X           nothing to do
+#   X     Y           X           put config back to X, no reboot needed
+#   Y     X           X           already configured, just reboot
+#   Y     Y           X           change config, reboot
+
+set -euo pipefail
+
+LIB=/usr/local/lib/pi-overlay-toolkit/overlay-common.sh
+[ -r "$LIB" ] || LIB="$(dirname "$(readlink -f "$0")")/overlay-common.sh"
+# shellcheck source=overlay-common.sh
+. "$LIB"
+
+usage() {
+    echo "Usage: $(basename "$0") on|off [--no-reboot]" >&2
+    exit 2
+}
+
+pot_require_root "$@"
+
+WANT="${1:-}"
+case "$WANT" in on|off) ;; *) usage ;; esac
+shift
+
+REBOOT=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-reboot) REBOOT=0 ;;
+        -h|--help) usage ;;
+        *) usage ;;
+    esac
+done
+
+pot_require_raspi_config
+
+LIVE=$(pot_live_word)
+CONF=$(pot_configured_word)
+HOST=$(hostname)
+
+if [ "$CONF" = "unknown" ]; then
+    echo "ERROR: can't find cmdline.txt under /boot/firmware or /boot on $HOST." >&2
+    exit 1
+fi
+
+describe() {
+    if [ "$1" = on ]; then
+        echo "ON (root is a RAM overlay; changes are lost at reboot)"
+    else
+        echo "OFF (root is writable; changes persist to the SD card)"
+    fi
+}
+
+# Already in the requested state, now and at next boot.
+if [ "$LIVE" = "$WANT" ] && [ "$CONF" = "$WANT" ]; then
+    echo "$HOST: overlay is already $(describe "$WANT")."
+    exit 0
+fi
+
+# Change the configured state if needed. raspi-config's exit code does
+# propagate from 'nonint', but we still verify cmdline.txt afterwards
+# rather than trusting it.
+if [ "$CONF" != "$WANT" ]; then
+    echo "$HOST: setting overlay to ${WANT^^} for next boot ..."
+    if [ "$WANT" = on ]; then
+        # May apt-get install overlayroot on first use, so needs network then.
+        raspi-config nonint enable_overlayfs
+    else
+        raspi-config nonint disable_overlayfs
+    fi
+    CONF=$(pot_configured_word)
+    if [ "$CONF" != "$WANT" ]; then
+        echo "ERROR: raspi-config ran but cmdline.txt still says overlay=$CONF." >&2
+        echo "Not rebooting. Check $(pot_cmdline_file)." >&2
+        exit 1
+    fi
+    sync
+fi
+
+# Live state already matches: we only had to undo a pending change.
+if [ "$LIVE" = "$WANT" ]; then
+    echo "$HOST: pending change cancelled; overlay stays $(describe "$WANT"). No reboot needed."
+    exit 0
+fi
+
+echo "$HOST: after reboot, overlay will be $(describe "$WANT")."
+if [ "$REBOOT" -eq 1 ]; then
+    pot_sync_and_reboot 5
+else
+    sync
+    echo "$HOST: --no-reboot given; the change applies at the next reboot."
+fi

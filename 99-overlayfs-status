@@ -1,55 +1,52 @@
 #!/bin/bash
 # /etc/update-motd.d/99-overlayfs-status
 #
-# Dynamic MOTD fragment. Raspberry Pi OS runs every executable script in
-# /etc/update-motd.d/ (in order) on each SSH login and concatenates the
-# output. This one checks live overlayfs status and, if it's ON, prints a
-# loud warning so you don't forget and edit something that will vanish on
-# the next reboot.
-
-# Ground-truth check: is the live root filesystem mounted as an overlay?
-# (raspi-config's own "get_overlay_now" getter prints its answer as text —
-# 0 = enabled, 1 = disabled — but its process exit code is always 0 on a
-# successful run regardless of the answer, so testing the exit code with
-# && / || is unreliable.)
+# Dynamic MOTD fragment, run by pam_motd on every SSH login. Shows the live
+# overlay state loudly, plus any change that's pending at next reboot, so
+# you don't edit something that will vanish (or forget to re-protect the
+# SD card).
 #
-# Match on root's FILESYSTEM TYPE (3rd field of /proc/mounts), not the
-# mount source name: some Raspberry Pi OS builds (e.g. trixie) implement
-# the overlay via the Debian "overlayroot" package, whose source device
-# is named "overlayroot" rather than "overlay" — matching on the source
-# name alone misses this case.
-ROOT_FSTYPE=$(awk '$2 == "/" { print $3; exit }' /proc/mounts)
-if [ "$ROOT_FSTYPE" = "overlay" ]; then
-    OVERLAY_ON=1
-else
-    OVERLAY_ON=0
-fi
+# Must never fail noisily or block a login: if the helper library is
+# missing, print nothing.
 
-if [ "$OVERLAY_ON" -eq 1 ]; then
-    cat <<'EOF'
+LIB=/usr/local/lib/pi-overlay-toolkit/overlay-common.sh
+[ -r "$LIB" ] || exit 0
+# shellcheck source=overlay-common.sh
+. "$LIB"
+
+HOST=$(hostname)
+LIVE=$(pot_live_word)
+CONF=$(pot_configured_word)
+
+if [ "$LIVE" = on ]; then
+    cat <<EOF
 
   ##########################################################################
-  #                                                                        #
-  #   ⚠️   OverlayFS is ON — root filesystem is READ-ONLY (RAM overlay)    #
-  #                                                                        #
-  #   ANY changes you make right now (apt install, config edits, files,   #
-  #   logs written outside excluded paths) will be LOST on next reboot.   #
-  #                                                                        #
-  #   To make persistent changes:                                        #
-  #     overlay-off      # disable overlay, reboots the Pi                #
-  #     ...make your changes, test them...                                #
-  #     overlay-on       # re-enable overlay, reboots the Pi              #
-  #                                                                        #
-  ##########################################################################
+     !!  ${HOST}: OverlayFS is ON. Root filesystem is a RAM overlay  !!
 
+     ANY change you make now (apt install, config edits, new files,
+     logs outside tmpfs) will be LOST at the next reboot.
+
+     To make a persistent change:
+       overlay-off      # root becomes writable, reboots
+       ...make and test your changes...
+       overlay-on       # protection back on, reboots
+  ##########################################################################
 EOF
 else
-    cat <<'EOF'
+    cat <<EOF
 
   --------------------------------------------------------------------------
-    OverlayFS is OFF — root filesystem is WRITABLE (changes persist to SD).
-    Remember to run 'overlay-on' when you're done making changes.
+     ${HOST}: OverlayFS is OFF. Root is WRITABLE (changes persist to SD).
+     Run 'overlay-on' when you're done making changes.
   --------------------------------------------------------------------------
-
 EOF
 fi
+
+if [ "$CONF" != unknown ] && [ "$CONF" != "$LIVE" ]; then
+    cat <<EOF
+     PENDING: overlay will be ${CONF^^} after the next reboot.
+     (Run 'overlay-${LIVE}' to cancel that, or reboot to apply it.)
+EOF
+fi
+echo
