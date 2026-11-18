@@ -17,7 +17,7 @@ interfaces are all detected at run time.
 
 | Host | Hardware | OS | Status |
 |---|---|---|---|
-| `weatherhat` | Pi Zero 2 W + BC Robotics Weather HAT Pro | Raspberry Pi OS trixie (Debian 13) | v1 verified on hardware; v2 (this version) not yet |
+| `weatherhat` | Pi Zero 2 W + BC Robotics Weather HAT Pro | Raspberry Pi OS trixie (Debian 13) | v2 verified 2026-11-18 (extras not installed) |
 | `enviro` | Pi Zero 2 W | | not yet deployed |
 | new weather-board Pi | Pi Zero 2 W | | not yet built |
 
