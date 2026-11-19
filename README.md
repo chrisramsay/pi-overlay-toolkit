@@ -20,6 +20,7 @@ interfaces are all detected at run time.
 | `weatherhat` | Pi Zero 2 W + BC Robotics Weather HAT Pro | Raspberry Pi OS trixie (Debian 13) | v2 verified 2026-11-18 (extras not installed) |
 | `enviro` | Pi Zero 2 W | | not yet deployed |
 | new weather-board Pi | Pi Zero 2 W | | not yet built |
+| `weatherboard` | Pi Zero 2 W + Pimoroni Inky Impression | <from os-release> | v2 verified 2026-11-19 (extras installed) |
 
 Update this table as each host is verified.
 
