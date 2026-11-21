@@ -177,13 +177,22 @@ drops off WiFi after a few days and needs a manual power cycle.
   (`RuntimeWatchdogSec=15`, `RebootWatchdogSec=2min`). No hand-editing of
   `system.conf` is needed.
 
+  Raspberry Pi OS on Trixie already does this for you. It ships
+  `/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf`
+  (`RuntimeWatchdogSec=1m`), and because systemd applies drop-ins in
+  filename order, wherever they live, that file overrides a `10-` drop-in
+  anyway. So when the installer finds it, it leaves the OS setting alone,
+  skips the drop-in and `config.txt` change, and removes a `10-pi-watchdog.conf`
+  left by an earlier install. Found on `weatherboard`, November 2026.
+
 ```bash
 overlay-off
 sudo bash extras/install-reliability-extras.sh   # --uninstall to remove
 overlay-on                                        # its reboot activates the watchdog
 
 # after the reboot, verify:
-systemctl show -p RuntimeWatchdogUSec     # 15s
+systemctl show -p RuntimeWatchdogUSec     # 15s, or 1min where Pi OS runs it
+journalctl -b | grep -i 'watchdog running'   # confirms it is armed
 ls -l /dev/watchdog*
 systemctl list-timers wifi-check.timer
 ```

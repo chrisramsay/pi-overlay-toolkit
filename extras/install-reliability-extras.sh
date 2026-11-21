@@ -11,6 +11,8 @@
 #   2. Hardware watchdog: dtparam=watchdog=on in config.txt, plus a systemd
 #      drop-in (/etc/systemd/system.conf.d/10-pi-watchdog.conf), so a full
 #      hang resets the board. No manual editing of system.conf needed.
+#      Skipped on Raspberry Pi OS images that already ship
+#      40-rpi-enable-watchdog.conf (Trixie onwards), which enables it.
 #
 # Host-agnostic. Run with the overlay OFF so the changes persist:
 #   overlay-off
@@ -32,6 +34,9 @@ fi
 HOST=$(hostname)
 DROPIN_DIR=/etc/systemd/system.conf.d
 DROPIN=$DROPIN_DIR/10-pi-watchdog.conf
+# Shipped by Raspberry Pi OS (Trixie onwards); when present, the OS already
+# runs the watchdog and our drop-in is not needed.
+RPI_WATCHDOG=/usr/lib/systemd/system.conf.d/40-rpi-enable-watchdog.conf
 
 if pot_overlay_live; then
     echo "ERROR: $HOST: OverlayFS is ON, so these changes would be lost at"
@@ -76,21 +81,35 @@ remove_legacy
 systemctl daemon-reload
 systemctl enable --now wifi-check.timer
 
-echo "$HOST: enabling hardware watchdog ..."
-if grep -q '^dtparam=watchdog=on' "$CONFIG_TXT"; then
-    echo "  dtparam=watchdog=on already in $CONFIG_TXT"
+echo "$HOST: hardware watchdog ..."
+if [ -e "${POT_FAKEROOT:-}$RPI_WATCHDOG" ]; then
+    # Raspberry Pi OS (Trixie onwards) enables the watchdog itself. Its
+    # 40-rpi-enable-watchdog.conf sorts after our 10-pi-watchdog.conf, so ours
+    # would be silently overridden anyway. Leave the OS setting in charge.
+    echo "  already enabled by Raspberry Pi OS ($RPI_WATCHDOG), leaving it alone"
+    if [ -e "$DROPIN" ]; then
+        rm -f "$DROPIN"
+        echo "  removed redundant $DROPIN from an earlier install"
+    fi
+    EXPECT="the OS value (1min on Trixie)"
 else
-    echo "dtparam=watchdog=on" >> "$CONFIG_TXT"
-    echo "  added dtparam=watchdog=on to $CONFIG_TXT"
+    if grep -q '^dtparam=watchdog=on' "$CONFIG_TXT"; then
+        echo "  dtparam=watchdog=on already in $CONFIG_TXT"
+    else
+        echo "dtparam=watchdog=on" >> "$CONFIG_TXT"
+        echo "  added dtparam=watchdog=on to $CONFIG_TXT"
+    fi
+    install -d -m 755 "$DROPIN_DIR"
+    install -m 644 "$SCRIPT_DIR/watchdog.conf" "$DROPIN"
+    echo "  installed $DROPIN"
+    EXPECT="15s"
 fi
-install -d -m 755 "$DROPIN_DIR"
-install -m 644 "$SCRIPT_DIR/watchdog.conf" "$DROPIN"
 
 sync
 
 echo ""
 echo "$HOST: done. Reboot for the watchdog to take effect, then check:"
-echo "  systemctl show -p RuntimeWatchdogUSec   # expect 15s"
+echo "  systemctl show -p RuntimeWatchdogUSec   # expect $EXPECT"
 echo "  ls -l /dev/watchdog*"
 echo "  systemctl list-timers wifi-check.timer"
 echo "  journalctl -t wifi-check                # only logs when it acts"
